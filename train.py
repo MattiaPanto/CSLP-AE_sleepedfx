@@ -107,6 +107,8 @@ parser.add_argument('--conversion_results', type=int, default=1)
 
 parser.add_argument('--checkpoint', type=int, default=1)
 parser.add_argument('--save_every', type=int, default=1400)
+parser.add_argument('--resume_from', type=str, default='/root/data/8wntm6t7-SL_CR_LP-439/checkpoint_19600.pt')
+
 args, unknown = parser.parse_known_args()
 
 loss_to_notation = {
@@ -154,7 +156,6 @@ if __name__ == '__main__':
     KERNEL_SIZE = 4
     
     USE_TQDM = args.use_tqdm
-    LOCATION = args.dataset_location
     OLD_SCHED = bool(args.old_sched)
 
     all_losses = ["recon", "sub_contra_s", "task_contra_t", "latent_permute_s", "latent_permute_t", "restored_permute_s", "restored_permute_t", "sub_content", "task_content", "sub_cross_s", "task_cross_t", "scramble_permute", "conversion_permute", "quadruplet_permute", "quadruplet_permute_F"]
@@ -315,13 +316,42 @@ if __name__ == '__main__':
     group = None
     if len(args.group) > 0:
         group = args.group
-    wandb.init(
-        project="converting-sleepedfx",
-        config=wandb_config,
-        group=group,
-        name=f'{loss_tags}-{args.add_name}-{np.random.randint(0, 1000):03d}' if len(args.add_name) > 0 else f'{loss_tags}-{np.random.randint(0, 1000):03d}',
-        tags=["split-model", "simple", loss_tags] + model.used_losses + extra_tags,
-    )
+
+    # -------- Resume checkpoint --------
+    start_step = 0
+    if args.resume_from and os.path.isfile(args.resume_from):
+        print(f"Resuming from checkpoint: {args.resume_from}", file=sys.stdout)
+        checkpoint = torch.load(args.resume_from, weights_only=False)
+        #resume_id = checkpoint.get('wandb_id', None)
+        resume_id = '8wntm6t7'
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # TODO
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_step = checkpoint.get('step', 0)
+
+        wandb.init(
+            project="converting-sleepedfx",
+            config=wandb_config,
+            group=group,
+            id=resume_id,
+            resume="must",
+            name=f'{loss_tags}-{args.add_name}-{np.random.randint(0, 1000):03d}' if len(args.add_name) > 0 else f'{loss_tags}-{np.random.randint(0, 1000):03d}',
+            tags=["split-model", "simple", loss_tags] + model.used_losses + extra_tags,
+        )
+    else:
+        wandb.init(
+            project="converting-sleepedfx",
+            config=wandb_config,
+            group=group,
+            name=f'{loss_tags}-{args.add_name}-{np.random.randint(0, 1000):03d}' if len(args.add_name) > 0 else f'{loss_tags}-{np.random.randint(0, 1000):03d}',
+            tags=["split-model", "simple", loss_tags] + model.used_losses + extra_tags,
+        )
+        if args.resume_from:
+            print(f"WARNING: Checkpoint {args.resume_from} not found. Starting from scratch.", file=sys.stderr)
+    # -------------------------------------
+    
+    
     
     wandb.run.log_code(include_fn=lambda path: path.endswith("train.py") or path.endswith("split_model.py") or path.endswith("utils.py"))
 
@@ -329,10 +359,14 @@ if __name__ == '__main__':
         checkpoint_dir = args.model_save_dir + f"{wandb.run.id}-{wandb.run.name}/"
         os.makedirs(checkpoint_dir, exist_ok=True)
 
+
     # Start training
     loss_list = defaultdict(list)
     with tqdm(range(BATCHES), unit_scale=EFFECTIVE_BATCH_SIZE, disable=not USE_TQDM, file=sys.stdout) as pbar:
-        for i in pbar:
+        for i in pbar.iterable[start_step:]:
+            pbar.n = i
+            pbar.refresh()
+
             model.train()
             optimizer.zero_grad()
             x, loss_dict = model.losses()
@@ -368,7 +402,8 @@ if __name__ == '__main__':
                         'step': i,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict() if not OLD_SCHED else None
+                        'scheduler_state_dict': scheduler.state_dict(),
+                        'wandb_id': wandb.run.id
                     }
                     save_as = checkpoint_dir + f"/checkpoint_{i}.pt"
                     torch.save(checkpoint, save_as)
